@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Replay a candidate migration against the two EventOps starting states."""
+
+import argparse
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+EXAMPLE = Path(__file__).resolve().parent / "examples" / "eventops"
+IMAGE = "postgres:17@sha256:846a7ddaa67a4b354ae1d21087b683901aa6113a4ed626d3787cfbf6c85e3e07"
+
+
+def sql(container, script):
+    return subprocess.run(
+        ["docker", "exec", "-i", "--user", "postgres", container, "psql",
+         "-X", "-qAt", "--set", "ON_ERROR_STOP=on", "--set", "VERBOSITY=verbose",
+         "--single-transaction", "--dbname", "postgres", "--file=-"],
+        input=script, capture_output=True, text=True, timeout=60,
+    )
+
+
+def replay(lane, candidate):
+    container = subprocess.check_output(
+        ["docker", "run", "--detach", "--network", "none",
+         "--tmpfs", "/var/lib/postgresql/data", "-e", "POSTGRES_HOST_AUTH_METHOD=trust", IMAGE],
+        text=True,
+    ).strip()
+    try:
+        for _ in range(60):
+            ready = subprocess.run(
+                ["docker", "exec", container, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"],
+                stdout=subprocess.DEVNULL, check=False,
+            )
+            if ready.returncode == 0:
+                break
+            time.sleep(1)
+        else:
+            raise RuntimeError("Postgres did not start in 60 seconds")
+
+        baseline = (EXAMPLE / "baseline.sql").read_text()
+        if lane == "upgrade":
+            baseline += (EXAMPLE / "existing.sql").read_text()
+        setup = sql(container, baseline + "\nselect count(*) from public.registrations;")
+        setup.check_returncode()
+        count = int(setup.stdout.strip())
+        if count != (1 if lane == "upgrade" else 0):
+            raise RuntimeError(f"Unexpected fixture count in {lane}: {count}")
+
+        checks = (EXAMPLE / "check.sql").read_text()
+        if lane == "upgrade":
+            checks += (EXAMPLE / "check-existing.sql").read_text()
+        for stage, script in [("migration", candidate), ("assertions", checks)]:
+            result = sql(container, script)
+            if result.returncode == 3:  # psql stopped on a SQL error.
+                print(f"{lane} FAIL | existing registrations: {count} | {stage}")
+                print(result.stderr.strip())
+                return False
+            result.check_returncode()
+        print(f"{lane} PASS | existing registrations: {count} | migration and assertions passed")
+        return True
+    finally:
+        subprocess.run(["docker", "rm", "-fv", container], stdout=subprocess.DEVNULL, check=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("migration", type=Path, help="path to the candidate SQL file")
+    args = parser.parse_args()
+    try:
+        candidate = args.migration.read_text()
+        print(f"Candidate: {args.migration}", flush=True)
+        fresh = replay("fresh", candidate)
+        upgrade = replay("upgrade", candidate)
+        return 0 if fresh and upgrade else 1
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+        print(f"Replay error: {error}", file=sys.stderr)
+        if isinstance(error, subprocess.CalledProcessError) and error.stderr:
+            print(error.stderr.strip(), file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

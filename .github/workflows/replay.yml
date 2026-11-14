@@ -1,0 +1,33 @@
+name: Migration Replay
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    name: EventOps migration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Replay proposed migration
+        shell: bash
+        run: |
+          status=0
+          report="$RUNNER_TEMP/eventops-replay.txt"
+          ./replay examples/eventops/proposed.sql > "$report" 2>&1 || status=$?
+          cat "$report"
+          {
+            echo '```text'
+            cat "$report"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+  regression:
+    name: Detect the missing backfill
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./tests/expect-upgrade-failure.sh

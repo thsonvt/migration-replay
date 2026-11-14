@@ -2,6 +2,8 @@
 
 Run the same Postgres migration twice. The first database starts empty. The second already has a checked-in attendee at Community Build Night. This catches a release that works for new installations and fails for existing organizers.
 
+[Open the example pull request](https://github.com/thsonvt/migration-replay/pull/1) to inspect the SQL change and its GitHub Actions check.
+
 ## Try the failing migration
 
 From the repo root, run this with Python 3 and a running Docker engine. The first run downloads a pinned PostgreSQL 17 image.
